@@ -1,10 +1,21 @@
+use std::cell::RefCell;
+
+use js_sys::JsString;
 use wasm_bindgen::JsCast;
 use web_sys::{Document, HtmlElement, Window};
 
 thread_local! {
-    pub(crate) static WINDOW: web_sys::Window = web_sys::window().unwrap();
+    pub(crate) static WINDOW: RefCell<web_sys::Window> = RefCell::new(
+        web_sys::window()
+        .unwrap_or(
+            JsString::from("window not available").unchecked_into())
+        );
 
-    pub(crate) static DOCUMENT: web_sys::Document = web_sys::window().unwrap().document().unwrap();
+    pub(crate) static DOCUMENT: RefCell<web_sys::Document> = {
+        let d = WINDOW.with_borrow(|w| w.document())
+            .unwrap_or(JsString::from("window has no document").unchecked_into());
+        RefCell::new(d)
+    };
 }
 
 /// Returns the [`Window`](https://developer.mozilla.org/en-US/docs/Web/API/Window).
@@ -12,7 +23,13 @@ thread_local! {
 /// This is cached as a thread-local variable, so calling `window()` multiple times
 /// requires only one call out to JavaScript.
 pub fn window() -> Window {
-    WINDOW.with(Clone::clone)
+    WINDOW.with_borrow(Window::clone)
+}
+
+/// Set the [`Window`](https://developer.mozilla.org/en-US/docs/Web/API/Window).
+pub fn set_custom_window_and_document(w: web_sys::Window) {
+    DOCUMENT.set(w.document().expect("window has no document"));
+    WINDOW.set(w);
 }
 
 /// Returns the [`Document`](https://developer.mozilla.org/en-US/docs/Web/API/Document).
@@ -23,7 +40,7 @@ pub fn window() -> Window {
 /// ## Panics
 /// Panics if called outside a browser environment.
 pub fn document() -> Document {
-    DOCUMENT.with(Clone::clone)
+    DOCUMENT.with_borrow(Document::clone)
 }
 
 /// The `<body>` element.
