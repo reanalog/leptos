@@ -3,7 +3,9 @@ use super::{
     Render, RenderHtml,
 };
 use crate::{
-    html::attribute::Attribute, hydration::Cursor, ssr::StreamBuilder,
+    html::attribute::{any_attribute::AnyAttribute, Attribute, NextAttribute},
+    hydration::Cursor,
+    ssr::StreamBuilder,
 };
 use either_of::*;
 use futures::future::join;
@@ -75,6 +77,13 @@ where
             Either::Right(right) => right.insert_before_this(child),
         }
     }
+
+    fn elements(&self) -> Vec<crate::renderer::types::Element> {
+        match &self {
+            Either::Left(left) => left.elements(),
+            Either::Right(right) => right.elements(),
+        }
+    }
 }
 
 impl<A, B> AddAnyAttr for Either<A, B>
@@ -114,12 +123,156 @@ const fn max_usize(vals: &[usize]) -> usize {
     max
 }
 
+#[cfg(not(erase_components))]
+impl<A, B> NextAttribute for Either<A, B>
+where
+    B: NextAttribute,
+    A: NextAttribute,
+{
+    type Output<NewAttr: Attribute> = Either<
+        <A as NextAttribute>::Output<NewAttr>,
+        <B as NextAttribute>::Output<NewAttr>,
+    >;
+
+    fn add_any_attr<NewAttr: Attribute>(
+        self,
+        new_attr: NewAttr,
+    ) -> Self::Output<NewAttr> {
+        match self {
+            Either::Left(left) => Either::Left(left.add_any_attr(new_attr)),
+            Either::Right(right) => Either::Right(right.add_any_attr(new_attr)),
+        }
+    }
+}
+
+#[cfg(erase_components)]
+impl<A, B> NextAttribute for Either<A, B>
+where
+    B: crate::html::attribute::any_attribute::IntoAnyAttribute,
+    A: crate::html::attribute::any_attribute::IntoAnyAttribute,
+{
+    type Output<NewAttr: Attribute> = Vec<AnyAttribute>;
+
+    fn add_any_attr<NewAttr: Attribute>(
+        self,
+        new_attr: NewAttr,
+    ) -> Self::Output<NewAttr> {
+        use crate::html::attribute::any_attribute::IntoAnyAttribute;
+
+        vec![
+            match self {
+                Either::Left(left) => left.into_any_attr(),
+                Either::Right(right) => right.into_any_attr(),
+            },
+            new_attr.into_any_attr(),
+        ]
+    }
+}
+
+impl<A, B> Attribute for Either<A, B>
+where
+    B: Attribute,
+    A: Attribute,
+{
+    const MIN_LENGTH: usize = max_usize(&[A::MIN_LENGTH, B::MIN_LENGTH]);
+
+    type AsyncOutput = Either<A::AsyncOutput, B::AsyncOutput>;
+    type State = Either<A::State, B::State>;
+    type Cloneable = Either<A::Cloneable, B::Cloneable>;
+    type CloneableOwned = Either<A::CloneableOwned, B::CloneableOwned>;
+
+    fn html_len(&self) -> usize {
+        match self {
+            Either::Left(left) => left.html_len(),
+            Either::Right(right) => right.html_len(),
+        }
+    }
+
+    fn to_html(
+        self,
+        buf: &mut String,
+        class: &mut String,
+        style: &mut String,
+        inner_html: &mut String,
+    ) {
+        match self {
+            Either::Left(left) => left.to_html(buf, class, style, inner_html),
+            Either::Right(right) => {
+                right.to_html(buf, class, style, inner_html)
+            }
+        }
+    }
+
+    fn hydrate<const FROM_SERVER: bool>(
+        self,
+        el: &crate::renderer::types::Element,
+    ) -> Self::State {
+        match self {
+            Either::Left(left) => Either::Left(left.hydrate::<FROM_SERVER>(el)),
+            Either::Right(right) => {
+                Either::Right(right.hydrate::<FROM_SERVER>(el))
+            }
+        }
+    }
+
+    fn build(self, el: &crate::renderer::types::Element) -> Self::State {
+        match self {
+            Either::Left(left) => Either::Left(left.build(el)),
+            Either::Right(right) => Either::Right(right.build(el)),
+        }
+    }
+
+    fn rebuild(self, state: &mut Self::State) {
+        match self {
+            Either::Left(left) => {
+                if let Some(state) = state.as_left_mut() {
+                    left.rebuild(state)
+                }
+            }
+            Either::Right(right) => {
+                if let Some(state) = state.as_right_mut() {
+                    right.rebuild(state)
+                }
+            }
+        }
+    }
+
+    fn into_cloneable(self) -> Self::Cloneable {
+        match self {
+            Either::Left(left) => Either::Left(left.into_cloneable()),
+            Either::Right(right) => Either::Right(right.into_cloneable()),
+        }
+    }
+
+    fn into_cloneable_owned(self) -> Self::CloneableOwned {
+        match self {
+            Either::Left(left) => Either::Left(left.into_cloneable_owned()),
+            Either::Right(right) => Either::Right(right.into_cloneable_owned()),
+        }
+    }
+
+    fn dry_resolve(&mut self) {
+        match self {
+            Either::Left(left) => left.dry_resolve(),
+            Either::Right(right) => right.dry_resolve(),
+        }
+    }
+
+    async fn resolve(self) -> Self::AsyncOutput {
+        match self {
+            Either::Left(left) => Either::Left(left.resolve().await),
+            Either::Right(right) => Either::Right(right.resolve().await),
+        }
+    }
+}
+
 impl<A, B> RenderHtml for Either<A, B>
 where
     A: RenderHtml,
     B: RenderHtml,
 {
     type AsyncOutput = Either<A::AsyncOutput, B::AsyncOutput>;
+    type Owned = Either<A::Owned, B::Owned>;
 
     fn dry_resolve(&mut self) {
         match self {
@@ -151,13 +304,20 @@ where
         position: &mut Position,
         escape: bool,
         mark_branches: bool,
+        extra_attrs: Vec<AnyAttribute>,
     ) {
         match self {
             Either::Left(left) => {
                 if mark_branches {
                     buf.open_branch("0");
                 }
-                left.to_html_with_buf(buf, position, escape, mark_branches);
+                left.to_html_with_buf(
+                    buf,
+                    position,
+                    escape,
+                    mark_branches,
+                    extra_attrs,
+                );
                 if mark_branches {
                     buf.close_branch("0");
                 }
@@ -166,7 +326,13 @@ where
                 if mark_branches {
                     buf.open_branch("1");
                 }
-                right.to_html_with_buf(buf, position, escape, mark_branches);
+                right.to_html_with_buf(
+                    buf,
+                    position,
+                    escape,
+                    mark_branches,
+                    extra_attrs,
+                );
                 if mark_branches {
                     buf.close_branch("1");
                 }
@@ -180,6 +346,7 @@ where
         position: &mut Position,
         escape: bool,
         mark_branches: bool,
+        extra_attrs: Vec<AnyAttribute>,
     ) where
         Self: Sized,
     {
@@ -193,6 +360,7 @@ where
                     position,
                     escape,
                     mark_branches,
+                    extra_attrs,
                 );
                 if mark_branches {
                     buf.close_branch("0");
@@ -207,6 +375,7 @@ where
                     position,
                     escape,
                     mark_branches,
+                    extra_attrs,
                 );
                 if mark_branches {
                     buf.close_branch("1");
@@ -227,6 +396,13 @@ where
             Either::Right(right) => {
                 Either::Right(right.hydrate::<FROM_SERVER>(cursor, position))
             }
+        }
+    }
+
+    fn into_owned(self) -> Self::Owned {
+        match self {
+            Either::Left(left) => Either::Left(left.into_owned()),
+            Either::Right(right) => Either::Right(right.into_owned()),
         }
     }
 }
@@ -333,6 +509,7 @@ where
     B: RenderHtml,
 {
     type AsyncOutput = EitherKeepAlive<A::AsyncOutput, B::AsyncOutput>;
+    type Owned = EitherKeepAlive<A::Owned, B::Owned>;
 
     const MIN_LENGTH: usize = 0;
 
@@ -371,15 +548,28 @@ where
         position: &mut Position,
         escape: bool,
         mark_branches: bool,
+        extra_attrs: Vec<AnyAttribute>,
     ) {
         if self.show_b {
             self.b
                 .expect("rendering B to HTML without filling it")
-                .to_html_with_buf(buf, position, escape, mark_branches);
+                .to_html_with_buf(
+                    buf,
+                    position,
+                    escape,
+                    mark_branches,
+                    extra_attrs,
+                );
         } else {
             self.a
                 .expect("rendering A to HTML without filling it")
-                .to_html_with_buf(buf, position, escape, mark_branches);
+                .to_html_with_buf(
+                    buf,
+                    position,
+                    escape,
+                    mark_branches,
+                    extra_attrs,
+                );
         }
     }
 
@@ -389,6 +579,7 @@ where
         position: &mut Position,
         escape: bool,
         mark_branches: bool,
+        extra_attrs: Vec<AnyAttribute>,
     ) where
         Self: Sized,
     {
@@ -400,6 +591,7 @@ where
                     position,
                     escape,
                     mark_branches,
+                    extra_attrs,
                 );
         } else {
             self.a
@@ -409,6 +601,7 @@ where
                     position,
                     escape,
                     mark_branches,
+                    extra_attrs,
                 );
         }
     }
@@ -435,6 +628,14 @@ where
         });
 
         EitherKeepAliveState { showing_b, a, b }
+    }
+
+    fn into_owned(self) -> Self::Owned {
+        EitherKeepAlive {
+            a: self.a.map(|a| a.into_owned()),
+            b: self.b.map(|b| b.into_owned()),
+            show_b: self.show_b,
+        }
     }
 }
 
@@ -482,6 +683,20 @@ where
                 .insert_before_this(child)
         }
     }
+
+    fn elements(&self) -> Vec<crate::renderer::types::Element> {
+        if self.showing_b {
+            self.b
+                .as_ref()
+                .map(|inner| inner.elements())
+                .unwrap_or_default()
+        } else {
+            self.a
+                .as_ref()
+                .map(|inner| inner.elements())
+                .unwrap_or_default()
+        }
+    }
 }
 
 macro_rules! tuples {
@@ -523,6 +738,12 @@ macro_rules! tuples {
                 ) -> bool {
                     match &self.state {
                         $([<EitherOf $num>]::$ty(this) =>this.insert_before_this(child),)*
+                    }
+                }
+
+                fn elements(&self) -> Vec<crate::renderer::types::Element> {
+                    match &self.state {
+                        $([<EitherOf $num>]::$ty(this) => this.elements(),)*
                     }
                 }
             }
@@ -592,6 +813,7 @@ macro_rules! tuples {
 
             {
                 type AsyncOutput = [<EitherOf $num>]<$($ty::AsyncOutput,)*>;
+                type Owned = [<EitherOf $num>]<$($ty::Owned,)*>;
 
                 const MIN_LENGTH: usize = max_usize(&[$($ty ::MIN_LENGTH,)*]);
 
@@ -617,13 +839,20 @@ macro_rules! tuples {
                     }
                 }
 
-                fn to_html_with_buf(self, buf: &mut String, position: &mut Position, escape: bool, mark_branches: bool) {
+                fn to_html_with_buf(
+                    self,
+                    buf: &mut String,
+                    position: &mut Position,
+                    escape: bool,
+                    mark_branches: bool,
+                    extra_attrs: Vec<AnyAttribute>
+                ) {
                     match self {
                         $([<EitherOf $num>]::$ty(this) => {
                             if mark_branches {
                                 buf.open_branch(stringify!($ty));
                             }
-                            this.to_html_with_buf(buf, position, escape, mark_branches);
+                            this.to_html_with_buf(buf, position, escape, mark_branches, extra_attrs);
                             if mark_branches {
                                 buf.close_branch(stringify!($ty));
                             }
@@ -633,7 +862,12 @@ macro_rules! tuples {
 
                 fn to_html_async_with_buf<const OUT_OF_ORDER: bool>(
                     self,
-                    buf: &mut StreamBuilder, position: &mut Position, escape: bool, mark_branches: bool) where
+                    buf: &mut StreamBuilder,
+                    position: &mut Position,
+                    escape: bool,
+                    mark_branches: bool,
+                    extra_attrs: Vec<AnyAttribute>
+                ) where
                     Self: Sized,
                 {
                     match self {
@@ -641,7 +875,7 @@ macro_rules! tuples {
                             if mark_branches {
                                 buf.open_branch(stringify!($ty));
                             }
-                            this.to_html_async_with_buf::<OUT_OF_ORDER>(buf, position, escape, mark_branches);
+                            this.to_html_async_with_buf::<OUT_OF_ORDER>(buf, position, escape, mark_branches, extra_attrs);
                             if mark_branches {
                                 buf.close_branch(stringify!($ty));
                             }
@@ -661,6 +895,14 @@ macro_rules! tuples {
                     };
 
                     Self::State { state }
+                }
+
+                fn into_owned(self) -> Self::Owned {
+                    match self {
+                        $([<EitherOf $num>]::$ty(this) => {
+                            [<EitherOf $num>]::$ty(this.into_owned())
+                        })*
+                    }
                 }
             }
         }

@@ -3,7 +3,7 @@
 /// Types that abstract over signals with values that can be read.
 pub mod read {
     use crate::{
-        computed::{ArcMemo, Memo, MemoInner},
+        computed::{ArcMemo, Memo},
         graph::untrack,
         owner::{
             ArcStoredValue, ArenaItem, FromLocal, LocalStorage, Storage,
@@ -215,6 +215,24 @@ pub mod read {
                 #[cfg(any(debug_assertions, leptos_debuginfo))]
                 defined_at: std::panic::Location::caller(),
             }
+        }
+    }
+
+    impl<T> ArcSignal<T, LocalStorage>
+    where
+        T: 'static,
+    {
+        /// Wraps a derived signal. Works like [`Signal::derive`] but uses [`LocalStorage`].
+        #[track_caller]
+        pub fn derive_local(derived_signal: impl Fn() -> T + 'static) -> Self {
+            Signal::derive_local(derived_signal).into()
+        }
+
+        /// Moves a static, nonreactive value into a signal, backed by [`ArcStoredValue`].
+        /// Works like [`Signal::stored`] but uses [`LocalStorage`].
+        #[track_caller]
+        pub fn stored_local(value: T) -> Self {
+            Signal::stored_local(value).into()
         }
     }
 
@@ -1735,14 +1753,32 @@ pub mod read {
     }
 
     /// The content of a [`Signal`] wrapper read guard, variable depending on the signal type.
-    #[derive(Debug)]
     pub enum SignalReadGuard<T: 'static, S: Storage<T>> {
         /// A read signal guard.
         Read(ReadGuard<T, Plain<T>>),
+        #[allow(clippy::type_complexity)]
         /// A memo guard.
-        Memo(ReadGuard<T, Mapped<Plain<MemoInner<T, S>>, T>>),
+        Memo(
+            ReadGuard<T, Mapped<Plain<Option<<S as Storage<T>>::Wrapped>>, T>>,
+        ),
         /// A fake guard for derived signals, the content had to actually be cloned, so it's not a guard but we pretend it is.
         Owned(T),
+    }
+
+    impl<T: 'static + std::fmt::Debug, S: Storage<T> + std::fmt::Debug>
+        std::fmt::Debug for SignalReadGuard<T, S>
+    where
+        <S as Storage<T>>::Wrapped: std::fmt::Debug,
+    {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::Read(arg0) => f.debug_tuple("Read").field(arg0).finish(),
+                Self::Memo(arg0) => f.debug_tuple("Memo").field(arg0).finish(),
+                Self::Owned(arg0) => {
+                    f.debug_tuple("Owned").field(arg0).finish()
+                }
+            }
+        }
     }
 
     impl<T, S> Clone for SignalReadGuard<T, S>
@@ -1750,7 +1786,7 @@ pub mod read {
         S: Storage<T>,
         T: Clone,
         Plain<T>: Clone,
-        Mapped<Plain<MemoInner<T, S>>, T>: Clone,
+        Mapped<Plain<Option<<S as Storage<T>>::Wrapped>>, T>: Clone,
     {
         fn clone(&self) -> Self {
             match self {

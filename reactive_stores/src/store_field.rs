@@ -9,8 +9,7 @@ use reactive_graph::{
         guards::{Plain, UntrackedWriteGuard, WriteGuard},
         ArcTrigger,
     },
-    traits::{DefinedAt, Track, UntrackableGuard},
-    unwrap_signal,
+    traits::{Track, UntrackableGuard},
 };
 use std::{iter, ops::Deref, sync::Arc};
 
@@ -51,6 +50,44 @@ pub trait StoreField: Sized {
     /// The keys for this field, if it is a keyed field.
     #[track_caller]
     fn keys(&self) -> Option<KeyMap>;
+
+    /// Returns triggers for this field, and all parent fields.
+    fn triggers_for_current_path(&self) -> Vec<ArcTrigger> {
+        self.triggers_for_path(self.path().into_iter().collect())
+    }
+
+    /// Returns triggers for the field at the given path, and all parent fields
+    fn triggers_for_path(&self, path: StorePath) -> Vec<ArcTrigger> {
+        let trigger = self.get_trigger(path.clone());
+        let mut full_path = path;
+        full_path.pop();
+
+        // build a list of triggers, starting with the full path to this node and ending with the root
+        // this will mean that the root is the final item, and this path is first
+        let mut triggers = Vec::with_capacity(full_path.len());
+        triggers.push(trigger.this.clone());
+        triggers.push(trigger.children.clone());
+        loop {
+            let inner = self.get_trigger(full_path.clone());
+            triggers.push(inner.children.clone());
+            if full_path.is_empty() {
+                break;
+            }
+            full_path.pop();
+        }
+
+        // when the WriteGuard is dropped, each trigger will be notified, in order
+        // reversing the list will cause the triggers to be notified starting from the root,
+        // then to each child down to this one
+        //
+        // notifying from the root down is important for things like OptionStoreExt::map()/unwrap(),
+        // where it's really important that any effects that subscribe to .is_some() run before effects
+        // that subscribe to the inner value, so that the inner effect can be canceled if the outer switches to `None`
+        // (see https://github.com/leptos-rs/leptos/issues/3704)
+        triggers.reverse();
+
+        triggers
+    }
 }
 
 impl<T> StoreField for ArcStore<T>
@@ -105,7 +142,7 @@ where
         self.inner
             .try_get_value()
             .map(|n| n.get_trigger(path))
-            .unwrap_or_else(unwrap_signal!(self))
+            .unwrap_or_default()
     }
 
     #[track_caller]
@@ -113,7 +150,7 @@ where
         self.inner
             .try_get_value()
             .map(|n| n.path().into_iter().collect::<Vec<_>>())
-            .unwrap_or_else(unwrap_signal!(self))
+            .unwrap_or_default()
     }
 
     #[track_caller]

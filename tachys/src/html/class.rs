@@ -1,5 +1,9 @@
-use super::attribute::{Attribute, NextAttribute};
+use super::attribute::{
+    maybe_next_attr_erasure_macros::next_attr_output_type, Attribute,
+    NextAttribute,
+};
 use crate::{
+    html::attribute::maybe_next_attr_erasure_macros::next_attr_combine,
     renderer::Rndr,
     view::{Position, ToTemplate},
 };
@@ -99,13 +103,13 @@ impl<C> NextAttribute for Class<C>
 where
     C: IntoClass,
 {
-    type Output<NewAttr: Attribute> = (Self, NewAttr);
+    next_attr_output_type!(Self, NewAttr);
 
     fn add_any_attr<NewAttr: Attribute>(
         self,
         new_attr: NewAttr,
     ) -> Self::Output<NewAttr> {
-        (self, new_attr)
+        next_attr_combine!(self, new_attr)
     }
 }
 
@@ -567,7 +571,7 @@ impl IntoClass for (&'static str, bool) {
     }
 }
 
-#[cfg(feature = "nightly")]
+#[cfg(all(feature = "nightly", rustc_nightly))]
 impl<const V: &'static str> IntoClass for crate::view::static_types::Static<V> {
     const TEMPLATE: &'static str = V;
 

@@ -43,13 +43,20 @@
 
 use reactive_graph::{
     owner::{LocalStorage, StoredValue},
-    traits::WithValue,
+    traits::{Dispose, WithValue},
 };
 use std::{fmt, rc::Rc, sync::Arc};
 
 /// A wrapper trait for calling callbacks.
 pub trait Callable<In: 'static, Out: 'static = ()> {
     /// calls the callback with the specified argument.
+    ///
+    /// Returns None if the callback has been disposed
+    fn try_run(&self, input: In) -> Option<Out>;
+    /// calls the callback with the specified argument.
+    ///
+    /// # Panics
+    /// Panics if you try to run a callback that has been disposed
     fn run(&self, input: In) -> Out;
 }
 
@@ -72,6 +79,12 @@ impl<In, Out> Clone for UnsyncCallback<In, Out> {
     }
 }
 
+impl<In, Out> Dispose for UnsyncCallback<In, Out> {
+    fn dispose(self) {
+        self.0.dispose();
+    }
+}
+
 impl<In, Out> UnsyncCallback<In, Out> {
     /// Creates a new callback from the given function.
     pub fn new<F>(f: F) -> UnsyncCallback<In, Out>
@@ -80,9 +93,23 @@ impl<In, Out> UnsyncCallback<In, Out> {
     {
         Self(StoredValue::new_local(Rc::new(f)))
     }
+
+    /// Returns `true` if both callbacks wrap the same underlying function pointer.
+    #[inline]
+    pub fn matches(&self, other: &Self) -> bool {
+        self.0.with_value(|self_value| {
+            other
+                .0
+                .with_value(|other_value| Rc::ptr_eq(self_value, other_value))
+        })
+    }
 }
 
 impl<In: 'static, Out: 'static> Callable<In, Out> for UnsyncCallback<In, Out> {
+    fn try_run(&self, input: In) -> Option<Out> {
+        self.0.try_with_value(|fun| fun(input))
+    }
+
     fn run(&self, input: In) -> Out {
         self.0.with_value(|fun| fun(input))
     }
@@ -158,16 +185,24 @@ impl<In, Out> fmt::Debug for Callback<In, Out> {
 }
 
 impl<In, Out> Callable<In, Out> for Callback<In, Out> {
+    fn try_run(&self, input: In) -> Option<Out> {
+        self.0.try_with_value(|fun| fun(input))
+    }
+
     fn run(&self, input: In) -> Out {
-        self.0
-            .try_with_value(|f| f(input))
-            .expect("called a callback that has been disposed")
+        self.0.with_value(|f| f(input))
     }
 }
 
 impl<In, Out> Clone for Callback<In, Out> {
     fn clone(&self) -> Self {
         *self
+    }
+}
+
+impl<In, Out> Dispose for Callback<In, Out> {
+    fn dispose(self) {
+        self.0.dispose();
     }
 }
 
@@ -212,11 +247,26 @@ impl<In: 'static, Out: 'static> Callback<In, Out> {
     {
         Self(StoredValue::new(Arc::new(fun)))
     }
+
+    /// Returns `true` if both callbacks wrap the same underlying function pointer.
+    #[inline]
+    pub fn matches(&self, other: &Self) -> bool {
+        self.0
+            .try_with_value(|self_value| {
+                other.0.try_with_value(|other_value| {
+                    Arc::ptr_eq(self_value, other_value)
+                })
+            })
+            .flatten()
+            .unwrap_or(false)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::Callable;
     use crate::callback::{Callback, UnsyncCallback};
+    use reactive_graph::traits::Dispose;
 
     struct NoClone {}
 
@@ -245,5 +295,49 @@ mod tests {
         let _callback: UnsyncCallback<(), String> = (|| "test").into();
         let _callback: UnsyncCallback<(i32, String), String> =
             (|num, s| format!("{num} {s}")).into();
+    }
+
+    #[test]
+    fn sync_callback_try_run() {
+        let callback = Callback::new(move |arg| arg);
+        assert_eq!(callback.try_run((0,)), Some((0,)));
+        callback.dispose();
+        assert_eq!(callback.try_run((0,)), None);
+    }
+
+    #[test]
+    fn unsync_callback_try_run() {
+        let callback = UnsyncCallback::new(move |arg| arg);
+        assert_eq!(callback.try_run((0,)), Some((0,)));
+        callback.dispose();
+        assert_eq!(callback.try_run((0,)), None);
+    }
+
+    #[test]
+    fn callback_matches_same() {
+        let callback1 = Callback::new(|x: i32| x * 2);
+        let callback2 = callback1;
+        assert!(callback1.matches(&callback2));
+    }
+
+    #[test]
+    fn callback_matches_different() {
+        let callback1 = Callback::new(|x: i32| x * 2);
+        let callback2 = Callback::new(|x: i32| x + 1);
+        assert!(!callback1.matches(&callback2));
+    }
+
+    #[test]
+    fn unsync_callback_matches_same() {
+        let callback1 = UnsyncCallback::new(|x: i32| x * 2);
+        let callback2 = callback1;
+        assert!(callback1.matches(&callback2));
+    }
+
+    #[test]
+    fn unsync_callback_matches_different() {
+        let callback1 = UnsyncCallback::new(|x: i32| x * 2);
+        let callback2 = UnsyncCallback::new(|x: i32| x + 1);
+        assert!(!callback1.matches(&callback2));
     }
 }
